@@ -3,97 +3,145 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Taxx Chess - Online Multiplayer</title>
-    <!-- Library Catur untuk UI (Chessboard.js) -->
+    <title>Taxx Chess Multiplayer</title>
     <link rel="stylesheet" href="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.css">
     <script src="https://code.jquery.com/jquery-3.5.1.min.js"></script>
     <script src="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.2/chess.min.js"></script>
-    <script src="/socket.io/socket.io.js"></script>
+    <!-- PeerJS untuk koneksi P2P -->
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
     <style>
         body { background: #1e1e24; color: white; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; margin: 0; padding: 20px; }
         #board { width: 100%; max-width: 500px; margin-top: 20px; }
         .header { text-align: center; margin-bottom: 10px; }
-        #status { margin-top: 15px; font-size: 18px; font-weight: bold; color: #4ade80; }
+        #status { margin-top: 15px; font-size: 18px; font-weight: bold; color: #4ade80; text-align: center;}
+        .waiting { color: #fbbf24 !important; }
+        .error { color: #ef4444 !important; }
     </style>
 </head>
 <body>
     <div class="header">
-        <h2>♟️ Taxx Chess Multiplayer</h2>
+        <h2>♟️ Taxx Chess</h2>
         <p>Room ID: <span id="roomId" style="color:#fbbf24"></span></p>
     </div>
 
     <div id="board"></div>
-    <div id="status">Menunggu pemain lain...</div>
+    <div id="status">Menghubungkan...</div>
 
     <script>
-        // Ambil Room ID dari URL (?room=123)
         const urlParams = new URLSearchParams(window.location.search);
         const room = urlParams.get('room');
-        document.getElementById('roomId').innerText = room;
-
+        document.getElementById('roomId').innerText = room || "Tidak ada";
+        
+        const statusDiv = document.getElementById('status');
         if (!room) {
-            document.getElementById('status').innerText = "Error: Room ID tidak ditemukan!";
+            statusDiv.innerText = "Error: Room ID tidak ditemukan di link!";
+            statusDiv.className = "error";
         }
 
-        const socket = io();
         const game = new Chess();
-        let myColor = 'w'; // Default putih
+        let myColor = 'w'; // Putih
         let board = null;
+        let peer = null;
+        let conn = null;
 
-        // Konek ke room
-        socket.emit('joinRoom', room);
-
-        socket.on('playerColor', (color) => {
-            myColor = color;
-            document.getElementById('status').innerText = color === 'w' ? "Kamu Putih. Giliran kamu!" : "Kamu Hitam. Tunggu lawan...";
-        });
-
-        socket.on('gameStart', () => {
-            document.getElementById('status').innerText = "Game dimulai!";
-        });
-
-        // Init Papan Catur
+        // Inisialisasi Papan
         board = Chessboard('board', {
             draggable: true,
             position: 'start',
-            orientation: myColor === 'w' ? 'white' : 'black',
+            orientation: 'white',
             onDrop: handleMove
         });
 
-        // Saat bidak digerakkan
-        function handleMove(source, target) {
-            // Cek apakah giliran dia
-            if (game.turn() !== myColor) {
-                return 'snapback';
-            }
+        // Inisialisasi PeerJS
+        // ID Peer akan menggunakan format: taxx-chess-[ROOMID]
+        const peerId = `taxx-chess-${room}`;
+        
+        // Kita buat mode acak, siapa yang duluan buka dia jadi Host, yang kedua jadi Client
+        // Tapi biar adil, kita tentukan lewat query param ?host=true
+        const isHost = urlParams.get('host') === 'true';
 
-            let move = game.move({
-                from: source,
-                to: target,
-                promotion: 'q' // Selalu promosi ke ratu
+        if (isHost) {
+            // JIKA JADI HOST (PEMAIN PERTAMA)
+            myColor = 'w';
+            peer = new Peer(peerId, { debug: 2 });
+            statusDiv.innerText = "Menunggu lawan masuk...";
+            statusDiv.className = "waiting";
+
+            peer.on('connection', (connection) => {
+                conn = connection;
+                setupConnection();
+                statusDiv.innerText = "Lawan terhubung! Giliran kamu (Putih).";
+                statusDiv.className = "";
             });
-
-            if (move === null) return 'snapback';
-
-            // Kirim langkah ke server
-            socket.emit('move', { room: room, source, target });
+        } else {
+            // JIKA JADI CLIENT (PEMAIN KEDUA)
+            myColor = 'b';
+            board.orientation('black');
+            peer = new Peer({ debug: 2 }); // Client pakai ID random
+            
+            peer.on('open', () => {
+                statusDiv.innerText = "Menghubungi Host...";
+                statusDiv.className = "waiting";
+                conn = peer.connect(peerId);
+                setupConnection();
+            });
         }
 
-        // Terima langkah dari lawan
-        socket.on('opponentMove', (data) => {
-            game.move({ from: data.source, to: data.target, promotion: 'q' });
-            board.position(game.fen());
+        function setupConnection() {
+            conn.on('open', () => {
+                if (!isHost) {
+                    statusDiv.innerText = "Terhubung! Kamu Hitam. Tunggu giliran Host.";
+                    statusDiv.className = "";
+                }
+            });
+
+            conn.on('data', (data) => {
+                if (data.type === 'move') {
+                    game.move({ from: data.source, to: data.target, promotion: 'q' });
+                    board.position(game.fen());
+                    updateStatus();
+                }
+            });
+
+            conn.on('close', () => {
+                statusDiv.innerText = "Lawan terputus / keluar dari game.";
+                statusDiv.className = "error";
+            });
+        }
+
+        function handleMove(source, target) {
+            if (game.turn() !== myColor) return 'snapback';
+
+            let move = game.move({ from: source, to: target, promotion: 'q' });
+            if (move === null) return 'snapback';
+
+            // Kirim ke lawan
+            if (conn && conn.open) {
+                conn.send({ type: 'move', source: source, target: target });
+            }
+
             updateStatus();
-        });
+        }
 
         function updateStatus() {
             if (game.in_checkmate()) {
-                document.getElementById('status').innerText = "SKAKMAT! Game selesai.";
+                statusDiv.innerText = "SKAKMAT! Game Selesai.";
+                statusDiv.className = "error";
+            } else if (game.in_draw()) {
+                statusDiv.innerText = "SERI! Game Selesai.";
+                statusDiv.className = "error";
             } else {
-                document.getElementById('status').innerText = game.turn() === myColor ? "Giliran kamu!" : "Giliran lawan...";
+                statusDiv.innerText = game.turn() === myColor ? "Giliran kamu!" : "Giliran lawan...";
+                statusDiv.className = game.turn() === myColor ? "" : "waiting";
             }
         }
+
+        peer.on('error', (err) => {
+            console.error(err);
+            statusDiv.innerText = `Error: ${err.type} (Mungkin room sudah penuh/tidak ada)`;
+            statusDiv.className = "error";
+        });
     </script>
 </body>
 </html>
